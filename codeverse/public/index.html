@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Multi-User Video Call</title>
+<style>
+body{margin:0;font-family:sans-serif;background:#111;color:white;display:flex;flex-direction:column;align-items:center;}
+#controls{margin-top:10px;}
+video{background:#000;border-radius:8px;margin:5px;width:30%;height:auto;}
+#videos{display:flex;flex-wrap:wrap;justify-content:center;width:100%;}
+input,button{padding:6px 12px;margin:5px;border-radius:6px;border:none;font-weight:bold;}
+button{cursor:pointer;background:#0f0;color:#000;}
+</style>
+</head>
+<body>
+<h2>Multi-User Video Call</h2>
+<div id="controls">
+<input type="text" id="roomId" placeholder="Enter Room ID">
+<button id="joinBtn">Join Room</button>
+</div>
+<div id="videos"></div>
+
+<script>
+const ws = new WebSocket(`ws://${location.host}`);
+const joinBtn = document.getElementById('joinBtn');
+const roomIdInput = document.getElementById('roomId');
+const videosDiv = document.getElementById('videos');
+
+let localStream;
+const pcs = {}; // peer connections keyed by client id
+const remoteVideos = {};
+
+async function initLocalStream(){
+  localStream = await navigator.mediaDevices.getUserMedia({video:true,audio:true});
+  const video = document.createElement('video');
+  video.autoplay = true;
+  video.muted = true;
+  video.srcObject = localStream;
+  videosDiv.appendChild(video);
+}
+
+joinBtn.onclick = async ()=>{
+  const roomId = roomIdInput.value.trim();
+  if(!roomId) return alert('Enter Room ID');
+  joinBtn.disabled = true;
+  await initLocalStream();
+  ws.send(JSON.stringify({type:'join',room:roomId}));
+};
+
+// handle signaling
+ws.onmessage = async msg=>{
+  const data = JSON.parse(msg.data);
+
+  // Existing clients in room
+  if(data.type === 'existing'){
+    for(const id of data.clients){
+      await createOffer(id);
+    }
+  }
+
+  // Offer received
+  if(data.type === 'offer'){
+    const pc = createPeerConnection(data.sender);
+    await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    ws.send(JSON.stringify({type:'answer',sdp:answer,target:data.sender}));
+  }
+
+  // Answer received
+  if(data.type === 'answer'){
+    const pc = pcs[data.sender];
+    await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+  }
+
+  // ICE candidate
+  if(data.type === 'ice'){
+    const pc = pcs[data.sender];
+    try{ await pc.addIceCandidate(data.candidate); } catch(e){console.error(e);}
+  }
+
+  // User left
+  if(data.type === 'leave'){
+    if(remoteVideos[data.id]){
+      videosDiv.removeChild(remoteVideos[data.id]);
+      delete remoteVideos[data.id];
+      if(pcs[data.id]) pcs[data.id].close();
+      delete pcs[data.id];
+    }
+  }
+};
+
+// create peer connection and offer
+async function createOffer(id){
+  const pc = createPeerConnection(id);
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  ws.send(JSON.stringify({type:'offer',sdp:offer,target:id}));
+}
+
+function createPeerConnection(id){
+  if(pcs[id]) return pcs[id];
+  const pc = new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+  localStream.getTracks().forEach(track=>pc.addTrack(track,localStream));
+  pc.ontrack = event => {
+    if(!remoteVideos[id]){
+      const video = document.createElement('video');
+      video.autoplay = true;
+      video.srcObject = event.streams[0];
+      videosDiv.appendChild(video);
+      remoteVideos[id] = video;
+    }
+  };
+  pc.onicecandidate = event => { if(event.candidate) ws.send(JSON.stringify({type:'ice',candidate:event.candidate,target:id})); };
+  pcs[id] = pc;
+  return pc;
+}
+</script>
+</body>
+</html>
